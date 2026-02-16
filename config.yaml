@@ -3,6 +3,13 @@ app:
   version: "0.0.1"
   debug: true
 
+# Device profile for resource tuning (roadmap: edge / Raspberry Pi optimization)
+# desktop: full quality, default settings
+# raspberry_pi: lighter audio/vision load for Pi 4/5
+# low_memory: minimal RAM use, smaller buffers
+device:
+  profile: "desktop" # desktop | raspberry_pi | low_memory
+
 ai:
   llm_provider: "openai" # or local
   local_model: "microsoft/DialoGPT-small"
@@ -124,6 +131,9 @@ navigation:
   audio_guidance: true # Use sound localization for navigation
   haptic_feedback: false
   voice_directions_frequency: "periodic" # constant, periodic, on-demand
+  # Continuous obstacle monitoring while a route is active (speaks only when there's a new warning)
+  continuous_obstacle_check: true
+  continuous_obstacle_interval: 5 # seconds between checks
 
 database:
   path: "vision_assistant.db"
