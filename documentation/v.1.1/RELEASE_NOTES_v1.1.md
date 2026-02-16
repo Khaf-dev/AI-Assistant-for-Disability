@@ -479,7 +479,7 @@ print('✓ All imports successful')
 ## License & Copyright
 
 Vision Assistant v1.1.0  
-Copyright © 2024-2026 Khaf-dev & Contributors  
+Copyright © 2025-2026 Khaf-dev & Contributors  
 Licensed under MIT License - See [LICENSE](/LICENSE)
 
 ---

@@ -446,6 +446,6 @@ Special thanks to:
 
 ---
 
-**Vision Assistant v1.1 - Making the world more accessible through AI 👁️🎤🔊**
+**Vision Assistant v1.1 - Making the world more accessible through AI**
 
 Download • Install • Try • Contribute

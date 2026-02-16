@@ -183,12 +183,26 @@ Switch between 8 supported languages on-the-fly.
 - "Find a [type] nearby"
 - "Nearest [location type]"
 
-### audio-Assisted Navigation
+### Audio-Assisted Navigation
 
 - "Guide me with audio"
 - "Audio help"
 - "Sound-guided navigation"
 - "Help me navigate with sound"
+
+### Guide Me Forward (real-time path + obstacles)
+
+Combines the next route step (if you have an active route), obstacle check, and sound cues in one response.
+
+- "Guide me forward"
+- "Guide me"
+- "What's ahead?"
+- "Check path"
+- "Is the path clear?"
+- "Next direction"
+- "Path clear"
+
+*After you get directions to a place, say "Guide me forward" anytime to hear the current step plus any obstacles or sounds ahead.*
 
 ---
 
