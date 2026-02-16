@@ -108,14 +108,12 @@ class FaceRecognizer:
             else:
                 frame_rgb = frame
             
-            # Detect face locations
-            face_locations = face_recognition.face_locations(
+            # Detect face locations (face_recognition lib has no type stubs)
+            face_locations = face_recognition.face_locations(  # type: ignore[reportAttributeAccessIssue]
                 frame_rgb,
                 model=self.model
             )
-            
-            # Generate encodings for each face
-            face_encodings = face_recognition.face_encodings(
+            face_encodings = face_recognition.face_encodings(  # type: ignore[reportAttributeAccessIssue]
                 frame_rgb,
                 face_locations
             )
@@ -166,7 +164,7 @@ class FaceRecognizer:
                 
                 for person_name, known_encodings in self.encodings_db.items():
                     for known_encoding in known_encodings:
-                        distance = face_recognition.face_distance([known_encoding], encoding)[0]
+                        distance = face_recognition.face_distance([known_encoding], encoding)[0]  # type: ignore[reportAttributeAccessIssue]
                         
                         if distance < best_match_distance:
                             best_match_distance = distance

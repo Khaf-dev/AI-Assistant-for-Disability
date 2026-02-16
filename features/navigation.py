@@ -1,5 +1,5 @@
 import requests
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any, cast
 import json
 from geopy.geocoders import Nominatim
 import geocoder
@@ -11,6 +11,10 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 class NavigationAssistant:
+    current_route: Optional[Dict[str, Any]]
+    current_location: Optional[Dict[str, Any]]
+    next_waypoint_idx: int
+
     def __init__(self, config_path: str = "config.yaml"):
         print("Initializing Navigation Assistant...")
         self.config = self._load_config(config_path)
@@ -43,12 +47,11 @@ class NavigationAssistant:
             logger.warning(f"Could not load config: {e}")
             return {}
         
-    async def get_current_location(self) -> Dict:
-        """Get current location using IP of GPS"""
+    async def get_current_location(self) -> Optional[Dict]:
+        """Get current location using IP or GPS. Returns None on failure."""
         try:
             # Try to get location from IP
             g = geocoder.ip('me')
-            
             if g.ok:
                 return {
                     'latitude': g.latlng[0],
@@ -57,33 +60,34 @@ class NavigationAssistant:
                     'city': g.city,
                     'country': g.country
                 }
-                
-                # Fallback to GPS (if available)
-                # This would require GPS Hardware
-                return {
-                    'latitude': 0.0,
-                    'longitude': 0.0,
-                    'address': 'Unknown location',
-                }
-                
+            # Fallback when IP geolocation fails (e.g. no network or not available)
+            logger.warning("IP geolocation failed or unavailable")
+            return None
         except Exception as e:
-            print(f"Location error: {e}")
+            logger.warning(f"Location error: {e}")
             return None
         
         
-    async def get_directions(self, start: Dict, destination: str) -> Dict:
-        """Get directions to destination"""
-        
-        # Geocode destination
-        dest_location = self.geolocator.geocode(destination)
-        
+    async def get_directions(self, start: Optional[Dict], destination: str) -> Dict:
+        """Get directions to destination. start may be None if location unknown."""
+        if not start or not isinstance(start, dict):
+            return {"error": "Current location could not be determined. Please check network or specify a starting address."}
+        if start.get('latitude') is None or start.get('longitude') is None:
+            return {"error": "Current location has no valid coordinates."}
+
+        # Geocode destination (sync call; cast for type checker if stubs are wrong)
+        dest_location = cast(Any, self.geolocator.geocode(destination))
         if not dest_location:
             return {"error": "Destination not found"}
-        
+        dest_lat = getattr(dest_location, "latitude", None)
+        dest_lon = getattr(dest_location, "longitude", None)
+        if dest_lat is None or dest_lon is None:
+            return {"error": "Destination coordinates could not be determined."}
+
         # Use OpenStreetMap or Google Maps API
         directions = await self._get_osm_route(
             (start['latitude'], start['longitude']),
-            (dest_location.latitude, dest_location.longitude)
+            (dest_lat, dest_lon)
         )
         
         return {
@@ -147,13 +151,19 @@ class NavigationAssistant:
     
     async def get_nearby_places(self, category: str, radius: int = 500) -> List[Dict]:
         """Find nearby places of interest"""
-        
+        if self.current_location is None:
+            return []
+        lat = self.current_location.get('latitude')
+        lon = self.current_location.get('longitude')
+        if lat is None or lon is None:
+            return []
+
         # Use Overpass API for OpenStreetMap
         query = f"""
         [out:json];
         (
-            node["amenity"="{category}"](around:{radius},{self.current_location[0]},{self.current_location[1]});
-            node["shop"="{category}"](around:{radius},{self.current_location[0]},{self.current_location[1]});
+            node["amenity"="{category}"](around:{radius},{lat},{lon});
+            node["shop"="{category}"](around:{radius},{lat},{lon});
         );
         
         out body;
@@ -171,7 +181,7 @@ class NavigationAssistant:
                     'name': element.get('tags', {}).get('name', 'Unnamed'),
                     'type': category,
                     'distance': self._calculate_distance(
-                        (self.current_location[0], self.current_location[1]),
+                        (lat, lon),
                         (element['lat'], element['lon'])
                     )
                 })
@@ -303,6 +313,20 @@ class NavigationAssistant:
             logger.error(f"Error getting next direction: {e}")
             return None
     
+    def advance_waypoint(self) -> bool:
+        """
+        Advance to the next route step (e.g. after user says "I've moved" or "Next step").
+        Returns True if advanced, False if no route or already at end.
+        """
+        if not self.current_route:
+            return False
+        steps = self.current_route.get('steps') or []
+        if self.next_waypoint_idx >= len(steps):
+            return False
+        self.next_waypoint_idx += 1
+        logger.info(f"Waypoint advanced to index {self.next_waypoint_idx}/{len(steps)}")
+        return True
+
     def set_audio_guidance(self, enabled: bool) -> None:
         """Enable/disable audio-assisted navigation"""
         self.audio_guidance_enabled = enabled
