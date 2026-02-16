@@ -60,6 +60,10 @@ class VisionAssistant:
             self.is_processing = False
             self.enrollment_mode = False
             self.enrollment_person_name = None
+            # Continuous obstacle monitoring (background task when a route is active)
+            self._obstacle_monitor_task = None
+            self._obstacle_monitor_stop = False
+            self._last_obstacle_summary = None
             self.user_context = {
                 'language': self.language,
                 'language_name': self.speech.get_language_name()
@@ -139,6 +143,15 @@ class VisionAssistant:
         self.speech.speak(f"Processing your request: {command}")
         
         try:
+            # Check for "What can you do?" / Help (command reference). "Help" alone or "help me" (short) → menu; longer e.g. "help me make a resume" → goes to intent, not emergency.
+            cmd_lower = command.strip().lower()
+            words = cmd_lower.split()
+            short_help = len(words) <= 2 and "help" in words
+            phrase_help = any(p in cmd_lower for p in ["what can you do", "what can i say", "commands", "what do you support", "how do i use", "what are you able to do", "list commands"])
+            if short_help or phrase_help:
+                await self._handle_help()
+                return
+            
             # Check for language switching command
             if any(phrase in command.lower() for phrase in ['change language', 'switch language', 'language to', 'speak']):
                 await self._handle_language_switch(command)
@@ -157,6 +170,20 @@ class VisionAssistant:
             # Check for audio assistance commands
             if any(phrase in command.lower() for phrase in ['listen', 'sound', 'audio', 'what do you hear', 'detect sounds', 'obstacle', 'check ahead', 'scan audio']):
                 await self._handle_audio_assistance(command)
+                return
+            
+            # Check for "guide me forward" / real-time navigation with obstacles
+            if any(phrase in command.lower() for phrase in ['guide me forward', 'guide me', "what's ahead", 'check path', 'is the path clear', 'next direction', 'path clear']):
+                await self._handle_guide_forward(command)
+                return
+            
+            # Check for "Next step" / "I've moved" to advance route waypoint
+            if any(phrase in command.lower() for phrase in ["next step", "i've moved", "i've moved forward", "i moved", "step forward", "continue to next"]):
+                advanced = self.navigation.advance_waypoint()
+                if advanced:
+                    self.speech.speak("Okay. Say 'guide me forward' for the next direction.")
+                else:
+                    self.speech.speak("There is no active route or you're already at the end. Say a destination to get directions.")
                 return
             
             # Parse intent
@@ -191,7 +218,7 @@ class VisionAssistant:
                 await self.handle_exit()
                 raise KeyboardInterrupt("User requested exit")
             
-            elif intent.get('action') == 'general_question':
+            elif intent.get('action') in ('general_question', 'general_questions'):
                 response = await self.llm.generate_response(command)
                 self.speech.speak(response)
             
@@ -321,26 +348,28 @@ class VisionAssistant:
             
             if destination:
                 self.speech.speak(f"Getting directions to {destination}...")
-                
-                # Get current location
                 location = await self.navigation.get_current_location()
                 if location:
                     self.speech.speak(f"Your current location is {location}")
-                
-                # Get directions
-                route = await self.navigation.get_directions(
-                    location,
-                    destination
-                )
-                
-                # Speak directions
-                if route and 'steps' in route:
+                else:
+                    self.speech.speak("Could not determine your current location. Directions may be unavailable.")
+                route = await self.navigation.get_directions(location, destination)
+                if route.get('error'):
+                    self.speech.speak(route['error'])
+                elif route and 'steps' in route:
+                    self._stop_obstacle_monitor()
+                    self.navigation.current_route = route
+                    self.navigation.next_waypoint_idx = 0
+                    self.navigation.current_location = location
+                    self._last_obstacle_summary = None
                     self.speech.speak(f"I found a route to {destination}. Here are the first few directions.")
                     for step in route['steps'][:3]:
                         instruction = step.get('instruction', '')
                         if instruction:
                             self.speech.speak(instruction)
                             logger.info(f"Direction: {instruction}")
+                    self.speech.speak("Say 'guide me forward' anytime for the next step and obstacle check.")
+                    self._start_obstacle_monitor()
                 else:
                     self.speech.speak(f"I couldn't find directions to {destination}.")
             else:
@@ -363,10 +392,9 @@ class VisionAssistant:
             
             # Get current location
             location = await self.navigation.get_current_location()
-            
-            # Speak reassurance
+            location_msg = str(location) if location else "could not be determined"
             self.speech.speak(
-                f"Emergency alert sent. Your location is {location}. Help is on the way."
+                f"Emergency alert sent. Your location {location_msg}. Help is on the way."
             )
         except Exception as e:
             logger.error(f"Error handling emergency: {e}")
@@ -587,14 +615,151 @@ class VisionAssistant:
             logger.error(f"Error in audio assistance: {e}")
             self.speech.speak("I encountered an error with audio processing. Please try again.")
     
+    async def _handle_help(self):
+        """Speak a short list of categories and example commands (vision, navigation, face, audio, language, emergency)."""
+        try:
+            self.speech.speak("Here’s what I can do. Vision: say describe the scene, read text, or identify objects.")
+            self.speech.speak("Navigation: say directions to a place, then guide me forward or next step.")
+            self.speech.speak("Faces: say enroll then a name, who do you know, or forget and a name.")
+            self.speech.speak("Audio: say what do you hear, check ahead, or classify sound.")
+            self.speech.speak("Language: say change language to Spanish, or switch to Indonesian.")
+            self.speech.speak("Emergency: say emergency or help me. Say goodbye to exit.")
+        except Exception as e:
+            logger.error(f"Error in help: {e}")
+            self.speech.speak("I couldn’t list commands right now. Try again.")
+    
+    async def _handle_guide_forward(self, command: str):
+        """
+        Real-time navigation: next direction + obstacle check + sound cues.
+        Aligns with roadmap: "Enhanced navigation with real-time obstacles".
+        """
+        try:
+            import time
+            self.speech.speak("Checking path ahead...")
+            
+            parts = []
+            
+            # 1) Next direction if we have an active route
+            next_step = await self.navigation.get_next_direction()
+            if next_step and next_step != "Route complete.":
+                parts.append(next_step)
+            elif next_step == "Route complete.":
+                parts.append("You have reached your route. Say a destination to navigate somewhere new.")
+            # If no route, we continue with obstacle/sound only
+            
+            # 2) Obstacle and sound check via microphone
+            if self.sound_localizer.start_listening():
+                audio_chunk = self.sound_localizer.get_audio_chunk()
+                time.sleep(0.3)
+                if audio_chunk is not None:
+                    obstacles = self.sound_localizer.detect_obstacles(audio_chunk)
+                    obstacle_msg = await self.navigation.assist_with_obstacles(obstacles)
+                    if obstacle_msg and "No obstacles" not in obstacle_msg:
+                        parts.append(obstacle_msg)
+                    elif not parts and (not obstacle_msg or "No obstacles" in obstacle_msg):
+                        parts.append("No obstacles detected. Path appears clear.")
+                    localization = self.sound_localizer.localize_sound(audio_chunk)
+                    if localization and localization.get('confidence', 0) > 0.5:
+                        audio_guidance = await self.navigation.get_audio_guidance({
+                            'direction': localization.get('direction', ''),
+                            'distance_meters': localization.get('distance', 0),
+                            'confidence': localization.get('confidence', 0),
+                        })
+                        if audio_guidance:
+                            parts.append(audio_guidance)
+                self.sound_localizer.stop_listening()
+            else:
+                if not parts:
+                    parts.append("Path check complete. Audio system unavailable for obstacles.")
+            
+            if parts:
+                self.speech.speak(" ".join(parts))
+                logger.info(f"Guide forward: {' | '.join(parts)}")
+            else:
+                self.speech.speak("Path appears clear. No route active. Say a destination to navigate.")
+        except Exception as e:
+            logger.error(f"Error in guide forward: {e}")
+            self.speech.speak("I couldn't check the path. Please try again.")
+    
+    def _do_one_obstacle_check_sync(self):
+        """Run one obstacle check (blocking). Returns list of obstacles or None. Used by continuous monitor."""
+        try:
+            if not self.sound_localizer.start_listening():
+                return None
+            try:
+                import time
+                time.sleep(0.2)
+                audio_chunk = self.sound_localizer.get_audio_chunk()
+                if audio_chunk is None:
+                    return None
+                return self.sound_localizer.detect_obstacles(audio_chunk)
+            finally:
+                self.sound_localizer.stop_listening()
+        except Exception as e:
+            logger.debug(f"Obstacle check error: {e}")
+            return None
+
+    async def _run_continuous_obstacle_monitor(self):
+        """Background task: every N seconds, run obstacle check and speak only when there's a new warning."""
+        nav_config = self.config.get("navigation", {})
+        enabled = nav_config.get("continuous_obstacle_check", False)
+        interval = max(3, int(nav_config.get("continuous_obstacle_interval", 5)))
+        if not enabled:
+            return
+        logger.info(f"Continuous obstacle monitoring started (interval={interval}s)")
+        try:
+            while not self._obstacle_monitor_stop:
+                await asyncio.sleep(interval)
+                if self._obstacle_monitor_stop:
+                    break
+                route = self.navigation.current_route
+                steps = (route or {}).get("steps") or []
+                if not route or self.navigation.next_waypoint_idx >= len(steps):
+                    logger.info("Route complete or none; stopping obstacle monitor")
+                    break
+                try:
+                    loop = asyncio.get_event_loop()
+                    obstacles = await loop.run_in_executor(None, self._do_one_obstacle_check_sync)
+                    obstacle_msg = await self.navigation.assist_with_obstacles(obstacles) if obstacles is not None else None
+                    if not obstacle_msg or "No obstacles" in (obstacle_msg or ""):
+                        summary = "clear"
+                    else:
+                        summary = obstacle_msg
+                    if summary != self._last_obstacle_summary:
+                        self._last_obstacle_summary = summary
+                        if summary != "clear" and obstacle_msg:
+                            self.speech.speak(obstacle_msg)
+                            logger.info(f"Obstacle alert: {obstacle_msg}")
+                except Exception as e:
+                    logger.debug(f"Monitor check error: {e}")
+        except asyncio.CancelledError:
+            pass
+        finally:
+            logger.info("Continuous obstacle monitoring stopped")
+
+    def _start_obstacle_monitor(self):
+        """Start the continuous obstacle monitoring background task if config enables it."""
+        if not self.config.get("navigation", {}).get("continuous_obstacle_check", False):
+            return
+        self._obstacle_monitor_stop = False
+        if self._obstacle_monitor_task and not self._obstacle_monitor_task.done():
+            self._obstacle_monitor_task.cancel()
+        self._obstacle_monitor_task = asyncio.create_task(self._run_continuous_obstacle_monitor())
+
+    def _stop_obstacle_monitor(self):
+        """Stop the continuous obstacle monitoring task."""
+        self._obstacle_monitor_stop = True
+        if self._obstacle_monitor_task and not self._obstacle_monitor_task.done():
+            self._obstacle_monitor_task.cancel()
+            self._obstacle_monitor_task = None
+
     async def handle_exit(self):
         """Handle user exit/goodbye command"""
         try:
             logger.info("User requested exit")
-            
+            self._stop_obstacle_monitor()
             # Provide farewell message
             self.speech.speak("Thank you for using Vision Assistant. Goodbye!")
-            
             # Cleanup resources
             self.vision.cleanup()
             self.db.close()
