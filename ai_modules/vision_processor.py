@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from ultralytics import YOLO
+from ultralytics import YOLO  # type: ignore[reportPrivateImportUsage]
 import easyocr
 from transformers import pipeline
 import torch
@@ -24,9 +24,9 @@ class VisionProcessor:
             self.scene_describer = None
             logger.info("Scene describer will use manual inference (no pretrained pipeline)")
             
-            # Face detector
+            # Face detector (cv2.data.haarcascades exists at runtime; Pylance stubs may omit it)
             self.face_detector = cv2.CascadeClassifier(
-                cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"  # type: ignore[reportAttributeAccessIssue]
             )
             
             # initialize camera
@@ -130,7 +130,8 @@ class VisionProcessor:
             
             texts = []
             for (bbox, text, prob) in results:
-                if prob > 0.5:  # confidence threshold
+                confidence = float(prob) if isinstance(prob, (int, float)) else 0.0
+                if confidence > 0.5:  # confidence threshold
                     texts.append(text)
             
             return texts

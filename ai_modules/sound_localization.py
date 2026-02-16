@@ -42,12 +42,23 @@ class SoundLocalizer:
         """
         self.config = self._load_config(config_path)
         self.sound_config = self.config.get('sound_localization', {})
+        device_profile = self.config.get('device', {}).get('profile', 'desktop')
         
-        # Audio settings
+        # Audio settings (optionally reduced for edge/low-memory profiles)
         self.enabled = self.sound_config.get('enabled', True)
-        self.sample_rate = self.sound_config.get('sample_rate', 16000)
-        self.chunk_size = self.sound_config.get('chunk_size', 1024)
+        base_rate = self.sound_config.get('sample_rate', 16000)
+        base_chunk = self.sound_config.get('chunk_size', 1024)
+        if device_profile == 'raspberry_pi':
+            self.sample_rate = min(base_rate, 8000)
+            self.chunk_size = max(512, base_chunk // 2)
+        elif device_profile == 'low_memory':
+            self.sample_rate = min(base_rate, 8000)
+            self.chunk_size = max(256, base_chunk // 2)
+        else:
+            self.sample_rate = base_rate
+            self.chunk_size = base_chunk
         self.channels = self.sound_config.get('channels', 1)
+        self._device_profile = device_profile
         
         # Detection settings
         detection_config = self.sound_config.get('detection', {})
@@ -79,7 +90,10 @@ class SoundLocalizer:
         self.p: Optional[Any] = pyaudio.PyAudio() if HAS_PYAUDIO else None
         self.stream: Optional[Any] = None
         
-        logger.info(f"SoundLocalizer initialized (enabled: {self.enabled}, method: {self.localization_method})")
+        logger.info(
+            f"SoundLocalizer initialized (enabled: {self.enabled}, method: {self.localization_method}, "
+            f"profile: {self._device_profile})"
+        )
     
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from YAML file"""
